@@ -1,0 +1,19 @@
+编译安装Linux内核的一般步骤
+
+------------------------------------------------------------
+make menuconfig
+make
+make INSTALL_MOD_PATH=$pkgdir/usr INSTALL_MOD_STRIP=1 DEPMOD=/doesnt/exist modules_install # 操作(1)
+install -Dm644 arch/x86/boot/bzImage $pkgdir/boot/vmlinuz                                  # 操作(2)
+install -Dm644 System.map $pkgdir/boot/System.map
+install -Dm644 .config $pkgdir/boot/config
+------------------------------------------------------------
+注意: 操作(1)作用只是安装内核模块, 操作(2)作用将内核复制到指定位置供bootloader加载。
+
+如果您将EXT4、NVME等重要的功能编译成了内核模块, 则必须借助initrd或initramfs来启动计算机。
+以下是使用dracut生成initramfs的过程:
+------------------------------------------------------------
+KERNEL_VERSION=<内核版本>
+depmod -a $KERNEL_VERSION
+dracut --kver $KERNEL_VERSION --add "dm dmsquash-live dmsquash-live-autooverlay kernel-modules bash" --zstd --force /boot/initramfs-$KERNEL_VERSION.img
+------------------------------------------------------------

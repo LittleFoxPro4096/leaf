@@ -1,0 +1,23 @@
+{
+  "PKGBUILD": {
+    "prefix": "PKGBUILD",
+    "body": [
+      "pkgname=\"$1\"",
+      "pkgver=\"$2\"",
+      "pkgdesc=\"$3\"",
+      "homepage=\"$4\"",
+      "license=(\"$5\")",
+      "sources=(\"\\${pkgname}-\\${pkgver}.tar.xz\")",
+      "",
+      "src_prepare() {",
+      "  tar -xf \\${DIST_DIR}/\\${pkgname}-\\${pkgver}/\\${sources[0]} --strip-components=1",
+      "}",
+      "",
+      "src_build() {",
+      "  $6",
+      "}",
+      ""
+    ],
+    "description": "PKGBUILD"
+  }
+}

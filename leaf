@@ -1,0 +1,408 @@
+#!/bin/bash
+set -e
+
+RED_COLOR="\e[1;31m"
+PURPLE_COLOR="\e[1;35m"
+GREEN_COLOR="\e[1;32m"
+CLEAR_COLOR="\e[0m"
+
+_DEF_PARALLEL_JOBS=4
+_ENV_PARALLEL_JOBS="${PARALLEL_JOBS}"
+source /etc/leaf.conf
+if [ -n "${_ENV_PARALLEL_JOBS}" ]; then
+  export PARALLEL_JOBS="${_ENV_PARALLEL_JOBS}"
+elif [ -z "${PARALLEL_JOBS}" ]; then
+  export PARALLEL_JOBS="${_DEF_PARALLEL_JOBS}"
+else
+  export PARALLEL_JOBS
+fi
+export MAKEFLAGS="-j${PARALLEL_JOBS}"
+export NINJAJOBS="${PARALLEL_JOBS}"
+export LC_ALL=C
+
+declare -A BUILD_OPTIONS
+BUILD_OPTIONS=([strip]="0" [libtool]="0" [zipman]="0")
+
+main() {
+  leaf_check_directories
+  if [ $# -le 1 ]; then
+    case $1 in
+      clean)
+        leaf_check_permission
+        rm -rf {"${BUILD_DIR}","${TEMP_DIR}"}/*
+        ;;
+      list)
+        cat "${INSTALLED_PACKAGES}"
+        ;;
+      *)
+        leaf_print_usage
+        ;;
+    esac
+  else
+    local _item
+    case $1 in
+      prepare|build|install|remove|pack)
+        leaf_check_permission
+        for _item in "${@:2}"; do
+          leaf_find_pkgbuild "${_item}"
+          leaf_reset_state
+          source "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD
+          leaf_parse_options
+          srcdir="${BUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}"
+          pkgdir="${srcdir}"/__pkgdir__
+          rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}"
+          leaf_${1}_package
+        done
+        ;;
+      search)
+        leaf_search_package "${@:2}"
+        ;;
+      show)
+        for _item in "${@:2}"; do
+          leaf_find_pkgbuild "${_item}"
+          leaf_show_package
+        done
+        ;;
+      unpack)
+        for _item in "${@:2}"; do
+          leaf_check_permission
+          leaf_reset_state
+          leaf_unpack_package "${_item}"
+        done
+        ;;
+      *)
+        leaf_print_usage
+        ;;
+    esac
+    if [ -n "${MESSAGE}" ]; then
+      echo -e "${MESSAGE}"
+    fi
+  fi
+}
+
+leaf_check_directories() {
+  if [ -z "${BUILD_DIR}" ]; then
+    leaf_error "Directory \${BUILD_DIR} must be existed"
+  elif [ -z "${TEMP_DIR}" ]; then
+    leaf_error "Directory \${TEMP_DIR} must be existed"
+  fi
+}
+
+leaf_check_permission() {
+  [ ${EUID} -eq 0 ] || leaf_error "Permission denied"
+}
+
+leaf_compress_man_pages() {
+  pushd "${pkgdir}" > /dev/null 2>&1
+  [ ! -d usr/share/man ] || {
+    local _item
+    find usr/share/man -type f,l | while read -r _item; do
+      case $(file -bi "${_item}") in
+        *text*)
+          /usr/bin/gzip -c -9 "${_item}" > "${_item}".gz
+          rm -fv "${_item}"
+          ;;
+        *symlink*)
+          ln -srv "$(readlink -m "${_item}")".gz "$(realpath "${_item}".gz)"
+          rm -fv "${_item}"
+          ;;
+        *)
+          ;;
+      esac
+    done
+  }
+  popd > /dev/null 2>&1
+}
+
+leaf_error() {
+  echo -e "${RED_COLOR}* $1${CLEAR_COLOR}" && exit 1
+}
+
+leaf_find_pkgbuild() {
+  local _location="$(find "${PKGBUILD_DIR}" -type f -wholename "*$1*.PKGBUILD" -printf "%P\n")"
+  if [ -z "${_location}" ]; then
+    leaf_error "Package $1's PKGBUILD does NOT exist"
+  elif [[ $(echo "${_location}" | wc -l) == 1 ]]; then
+    PKG_PREFIX="$(echo "${_location}" | awk -F'/' '{print $1}')"
+    PKG_NAME="$(echo "${_location%.PKGBUILD}" | awk -F'/' '{print $2}')"
+  else
+    leaf_error "Ambiguous packages, the prefix or version of package must be specified"
+  fi
+}
+
+leaf_invoke_hooks() {
+  local _hook _target
+  local _trace_dir="${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
+  find "${HOOK_DIR}" -type f -name "*.HOOK" | while read -r _hook; do
+    source "${_hook}"
+    for _target in "${target[@]}"; do
+      if [ -n "$(grep -e "${_target}" "${_trace_dir}"/FILES)" ]; then
+        operation
+        break
+      fi
+    done
+  done
+}
+
+leaf_merge_package() {
+  pushd $1 > /dev/null 2>&1
+  local _trace_dir="${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
+  local _item _mode _owner _group
+  cat "${_trace_dir}"/DIRS | while read -r _item; do
+    _mode=$(stat -c %a ."${_item}")
+    _owner=$(stat -c %u ."${_item}")
+    _group=$(stat -c %g ."${_item}")
+    install -d -m ${_mode} -o ${_owner} -g ${_group} "${_item}"
+  done
+  cat "${_trace_dir}"/FILES | while read -r _item; do
+    _mode=$(stat -c %a ."${_item}")
+    _owner=$(stat -c %u ."${_item}")
+    _group=$(stat -c %g ."${_item}")
+    install -D -m ${_mode} -o ${_owner} -g ${_group} ."${_item}" "${_item}"
+  done
+  cat "${_trace_dir}"/LINKS | while read -r _item; do
+    cp -dp ."${_item}" "${_item}"
+  done
+  leaf_invoke_hooks
+  popd > /dev/null 2>&1
+}
+
+leaf_parse_options() {
+  local _option_array=(${DEFAULT_BUILD_OPTIONS[@]} ${options[@]})
+  for option in ${_option_array[@]}; do
+    if [[ x"${option}" == x"strip" ]]; then
+      BUILD_OPTIONS["strip"]="1"
+    fi
+    if [[ x"${option}" == x"!strip" ]]; then
+      BUILD_OPTIONS["strip"]="0"
+    fi
+    if [[ x"${option}" == x"libtool" ]]; then
+      BUILD_OPTIONS["libtool"]="1"
+    fi
+    if [[ x"${option}" == x"!libtool" ]]; then
+      BUILD_OPTIONS["libtool"]="0"
+    fi
+    if [[ x"${option}" == x"zipman" ]]; then
+      BUILD_OPTIONS["zipman"]="1"
+    fi
+    if [[ x"${option}" == x"!zipman" ]]; then
+      BUILD_OPTIONS["zipman"]="0"
+    fi
+  done
+}
+
+leaf_print_usage() {
+  cat << EOF
+Usage: leaf [option] [packages]
+Option:     prepare    prepare packages but do not build
+            build      build packages but do not install
+            install    install packages
+            remove     remove packages
+            clean      clean all source folders
+            list       list installed packages
+            search     search packages by keyword
+            show       show package details
+            pack       build packages and pack
+            unpack     unpack binary packages
+                            This leaf does not have Super Cow Powers.
+EOF
+}
+
+leaf_record_message() {
+  MESSAGE+="\n${PURPLE_COLOR}* Message from ${PKG_PREFIX}/${PKG_NAME}${CLEAR_COLOR}\n"
+  local _item
+  for _item in "${@:1}"; do
+    MESSAGE+="${GREEN_COLOR}* ${_item}${CLEAR_COLOR}\n"
+  done
+}
+
+leaf_remove_libtool_files() {
+  find "${pkgdir}" -name "*.la" -delete
+}
+
+leaf_reset_state() {
+  options=()
+  src_preinstall() {
+    :
+  }
+  src_postinstall() {
+    :
+  }
+  src_preremove() {
+    :
+  }
+  src_postremove() {
+    :
+  }
+}
+
+leaf_strip_files() {
+  pushd "${pkgdir}" > /dev/null 2>&1
+  local _file
+  find . -type f | while read -r _file; do
+    case $(file -bi "${_file}") in
+      *application/x-sharedlib*)       # libraries(.so)
+        strip --strip-unneeded "${_file}"
+        ;;
+      *application/x-pie-executable*)  # libraries(.so)
+        strip --strip-unneeded "${_file}"
+        ;;
+      *application/x-archive*)         # libraries(.a)
+        strip --strip-debug "${_file}"
+        ;;
+      *application/x-object*)
+        case "${_file}" in
+          *.ko)                        # kernel module
+            strip --strip-unneeded "${_file}"
+            ;;
+          *)
+            ;;
+        esac
+        ;;
+      *application/x-executable*)      # binaries
+        strip --strip-all "${_file}"
+        ;;
+      *)
+        ;;
+    esac
+  done
+  popd > /dev/null 2>&1
+}
+
+leaf_trace_package() {
+  pushd "$1" > /dev/null 2>&1
+  local _trace_dir="${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
+  install -dm755 "${_trace_dir}"
+  find . -type d | sort > "${_trace_dir}"/DIRS
+  sed -i "1d" "$_trace_dir"/DIRS
+  find . -type f | sort > "${_trace_dir}"/FILES
+  find . -type l | sort > "${_trace_dir}"/LINKS
+  sed -i "s/.//" "${_trace_dir}"/{DIRS,FILES,LINKS}
+  popd > /dev/null 2>&1
+}
+
+leaf_update_package_database() {
+  local _item="$(echo "$2" | awk 'BEGIN{FS="/";OFS="\\/"}{print $1,$2}')"
+  case $1 in
+    add)
+      sed -i "/${_item}/d" "${INSTALLED_PACKAGES}"
+      echo "$2" >> ${INSTALLED_PACKAGES}
+      ;;
+    delete)
+      sed -i "/${_item}/d" "${INSTALLED_PACKAGES}"
+      ;;
+  esac
+}
+
+leaf_update_environment() {
+  ldconfig
+  [ ! -r /etc/profile ] || source /etc/profile
+}
+
+leaf_prepare_package() {
+  src_prepare
+}
+
+leaf_build_package() {
+  leaf_prepare_package
+  src_build
+  local _option
+  for _option in $(echo ${!BUILD_OPTIONS[*]}); do
+    if [[ x"${_option}" == x"strip" ]] && [[ x"${BUILD_OPTIONS[$_option]}" == x"1" ]]; then
+      leaf_strip_files
+    fi
+    if [[ x"${_option}" == x"libtool" ]] && [[ x"${BUILD_OPTIONS[$_option]}" == x"0" ]]; then
+      leaf_remove_libtool_files
+    fi
+    if [[ x"${_option}" == x"zipman" ]] && [[ x"${BUILD_OPTIONS[$_option]}" = x"1" ]]; then
+      leaf_compress_man_pages
+    fi
+  done
+  if [[ x"${ENABLE_DEBUG_TREE}" == x"true" ]]; then
+    [ ! -x /usr/bin/tree ] || /usr/bin/tree "${pkgdir}"
+  fi
+}
+
+leaf_install_package() {
+  leaf_build_package
+  leaf_trace_package "${pkgdir}"
+  src_preinstall
+  leaf_merge_package "${pkgdir}"
+  src_postinstall
+  leaf_update_package_database add "${PKG_PREFIX}/${PKG_NAME}"
+  leaf_update_environment
+  echo -e "${GREEN_COLOR}* Package ${PKG_PREFIX}/${PKG_NAME} has been installed${CLEAR_COLOR}\n"
+}
+
+leaf_remove_package() {
+  [ -n "$(grep "${PKG_PREFIX}/${PKG_NAME}" ${INSTALLED_PACKAGES})" ] || {
+    leaf_error "Package ${PKG_PREFIX}/${PKG_NAME} is NOT installed"
+  }
+  src_preremove
+  local _file _link _directory
+  cat "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}/FILES" | while read -r _file; do
+    rm -fv "${_file}"
+  done
+  cat "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}/LINKS" | while read -r _link; do
+    [ ! -L "${_link}" ] || rm -fv "${_link}"
+  done
+  cat "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}/DIRS" | while read -r _directory; do
+    rmdir --ignore-fail-on-non-empty "${_directory}"
+  done
+  rm -rf "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
+  src_postremove
+  leaf_update_package_database delete "${PKG_PREFIX}/${PKG_NAME}"
+  leaf_update_environment
+}
+
+leaf_search_package() {
+  local _item _regex
+  for _item in "$@"; do
+    _regex+="${_item}\|"
+  done
+  _regex="${_regex:0:${#_regex}-2}"
+  find "${PKGBUILD_DIR}" -type f -regex ".*\(${_regex}\).*\.PKGBUILD" -printf "%P\n" | while read -r _item; do
+    echo "${_item%.PKGBUILD}"
+  done
+}
+
+leaf_show_package() {
+  source "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD
+  echo "Package: ${pkgname}"
+  echo "Version: ${pkgver}"
+  echo "Description: ${pkgdesc}"
+  echo "Homepage: ${homepage}"
+  echo -e "License: ${license[@]}\n"
+}
+
+leaf_pack_package() {
+  leaf_build_package
+  pushd "${srcdir}" > /dev/null 2>&1
+  echo "${PKG_PREFIX}" > .PKG_PREFIX
+  install -m644 "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD .PKGBUILD
+  install -dm755 "${BINARY_DIR}"
+  local _target="${BINARY_DIR}/${pkgname}-${pkgver}${BINARY_EXT}"
+  rm -fv "${_target}"
+  tar -I "${COMPRESS_PROG}" -cf "${_target}" "$(basename ${pkgdir})" .PKG{_PREFIX,BUILD}
+  popd > /dev/null 2>&1
+}
+
+leaf_unpack_package() {
+  srcdir="${TEMP_DIR}/$(basename ${1%.pkg.*})"
+  pkgdir="${srcdir}"/__pkgdir__
+  rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}"
+  tar -xf $1 -C "${srcdir}"
+  source "${srcdir}"/.PKGBUILD
+  PKG_PREFIX="$(cat "${srcdir}"/.PKG_PREFIX)"
+  PKG_NAME="${pkgname}-${pkgver}"
+  install -Dm644 "${srcdir}"/.PKGBUILD "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD
+  leaf_trace_package "${pkgdir}"
+  src_preinstall
+  leaf_merge_package "${pkgdir}"
+  src_postinstall
+  leaf_update_package_database add "${PKG_PREFIX}/${PKG_NAME}"
+  leaf_update_environment
+  echo -e "${GREEN_COLOR}* Package ${PKG_PREFIX}/${PKG_NAME} has been installed${CLEAR_COLOR}\n"
+}
+
+main $@
