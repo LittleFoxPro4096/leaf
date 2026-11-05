@@ -1,4 +1,5 @@
-target=()
+# target: shell glob patterns matched against the package's installed file paths
+target=("/usr/share/info/*.info*")
 operation() {
   :
 }

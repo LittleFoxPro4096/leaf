@@ -1,5 +1,4 @@
-#!/bin/bash
-set -e
+#!/usr/bin/env bash
 
 RED_COLOR="\e[1;31m"
 YELLOW_COLOR="\e[1;33m"
@@ -10,133 +9,342 @@ CLEAR_COLOR="\e[0m"
 source /etc/leaf.conf
 
 export LC_ALL=C
-export PARALLEL_JOBS
 if ! [[ "${PARALLEL_JOBS}" =~ ^[0-9]+$ ]]; then
-  export PARALLEL_JOBS="4"
+  PARALLEL_JOBS="4"
 fi
 export MAKEFLAGS="-j${PARALLEL_JOBS}"
 export NINJAJOBS="${PARALLEL_JOBS}"
-export LEAF_DIR="${LEAF_DIR:-/var/lib/leaf}"
-export DIST_DIR="${DIST_DIR:-${LEAF_DIR}/distfiles}"
-export BUILD_DIR="${BUILD_DIR:-${LEAF_DIR}/build}"
-export PKGBUILD_DIR="${PKGBUILD_DIR:-${LEAF_DIR}/pkgbuild}"
-export TRACE_DIR="${TRACE_DIR:-${LEAF_DIR}/trace}"
-export HOOK_DIR="${HOOK_DIR:-${LEAF_DIR}/hooks}"
-export BINARY_DIR="${BINARY_DIR:-${LEAF_DIR}/binaries}"
-export TEMP_DIR="${TEMP_DIR:-${LEAF_DIR}/temp}"
-export INSTALLED_PACKAGES="${INSTALLED_PACKAGES:-${LEAF_DIR}/installed}"
-export DEFAULT_BUILD_OPTIONS=("strip" "!libtool" "zipman")
-export COMPRESS_PROG="${COMPRESS_PROG:-zstd -19 -T0}"
-export BINARY_EXT="${BINARY_EXT:-.pkg.tar.zst}"
-export ENABLE_DEBUG_TREE="${ENABLE_DEBUG_TREE:-true}"
+LEAF_DIR="${LEAF_DIR:-/var/lib/leaf}"
+DIST_DIR="${DIST_DIR:-${LEAF_DIR}/distfiles}"
+BUILD_DIR="${BUILD_DIR:-${LEAF_DIR}/build}"
+PKGBUILD_DIR="${PKGBUILD_DIR:-${LEAF_DIR}/pkgbuild}"
+TRACE_DIR="${TRACE_DIR:-${LEAF_DIR}/trace}"
+HOOK_DIR="${HOOK_DIR:-${LEAF_DIR}/hooks}"
+BINARY_DIR="${BINARY_DIR:-${LEAF_DIR}/binaries}"
+TEMP_DIR="${TEMP_DIR:-${LEAF_DIR}/temp}"
+INSTALLED_PACKAGES="${INSTALLED_PACKAGES:-${LEAF_DIR}/installed}"
+LOG_DIR="${LOG_DIR:-${LEAF_DIR}/logs}"
+LOG_KEEP="${LOG_KEEP:-20}"
+VERBOSE="${VERBOSE:-false}"
+DEFAULT_BUILD_OPTIONS=("strip" "!libtool" "zipman")
+COMPRESS_PROG="${COMPRESS_PROG:-zstd -19 -T0}"
+BINARY_EXT="${BINARY_EXT:-.pkg.tar.zst}"
+ENABLE_DEBUG_TREE="${ENABLE_DEBUG_TREE:-true}"
 
 declare -A BUILD_OPTIONS=([strip]="0" [libtool]="0" [zipman]="0")
 
+MESSAGE_FILE=""
+BUILD_LOG_FILE=""
+TRANS_LOG_FILE=""
+CURRENT_LOG=""
+LEAF_COMMAND=""
+LEAF_PHASE=""
+
 main() {
+  trap 'rm -f "${MESSAGE_FILE}"' EXIT
+  trap leaf_on_sigint INT
+  MESSAGE_FILE="$(mktemp)" || leaf_error "Failed to create temporary file"
   leaf_create_directories
-  if [ $# -le 1 ]; then
-    case $1 in
-      clean)
-        leaf_check_permission
-        rm -rf {"${BUILD_DIR}","${TEMP_DIR}"}/*
-        ;;
-      list)
-        cat "${INSTALLED_PACKAGES}"
+
+  local _args=() _a
+  for _a in "$@"; do
+    case "${_a}" in
+      -v|--verbose)
+        VERBOSE="true"
         ;;
       *)
-        leaf_print_usage
+        _args+=("${_a}")
         ;;
     esac
+  done
+  set -- "${_args[@]}"
+  LEAF_COMMAND="${1:-}"
+
+  local _summary=() _failed="false"
+  local _i _total _item _start _elapsed _log _rc
+
+  case "${1:-}" in
+    clean)
+      leaf_check_permission
+      rm -rf "${BUILD_DIR}"/* "${TEMP_DIR}"/*
+      if [[ "${2:-}" == "--logs" ]]; then
+        rm -rf "${LOG_DIR}"/build/* "${LOG_DIR}"/transaction/*
+        : > "${LOG_DIR}"/leaf.log
+        leaf_journal INFO "cleaned build/temp directories and all logs"
+        leaf_info "The build/temp directories and logs have been cleaned"
+      else
+        leaf_journal INFO "cleaned build/temp directories"
+        leaf_info "The build/temp directories have been cleaned"
+      fi
+      ;;
+    list)
+      cat "${INSTALLED_PACKAGES}"
+      ;;
+    search)
+      leaf_search_package "${@:2}"
+      ;;
+    show)
+      for _item in "${@:2}"; do
+        leaf_find_pkgbuild "${_item}"
+        leaf_show_package
+      done
+      ;;
+    prepare|build|install|remove|pack)
+      leaf_check_permission
+      local _ok
+      case $1 in
+        prepare) _ok="PREPARED" ;;
+        build)   _ok="BUILT" ;;
+        install) _ok="INSTALLED" ;;
+        remove)  _ok="REMOVED" ;;
+        pack)    _ok="PACKED" ;;
+      esac
+      leaf_journal INFO "Command: leaf $* (user=$(whoami))"
+      _total=$(($# - 1)) && _i=0
+      for _item in "${@:2}"; do
+        _i=$((_i + 1))
+        leaf_find_pkgbuild "${_item}"
+        leaf_reset_state
+        source "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD || leaf_error "Failed to load ${PKG_PREFIX}/${PKG_NAME}.PKGBUILD"
+        leaf_parse_options
+        srcdir="${BUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}"
+        pkgdir="${srcdir}"/__pkgdir__
+        leaf_setup_logs
+        leaf_banner "${_i}" "${_total}" "${PKG_PREFIX}/${PKG_NAME}"
+        if [[ "${_failed}" == "true" ]]; then
+          echo -e "  ${YELLOW_COLOR}-> SKIPPED (previous package failed)${CLEAR_COLOR}"
+          leaf_journal WARNING "$1 ${PKG_PREFIX}/${PKG_NAME} SKIPPED (previous package failed)"
+          _summary+=("$(printf '%-12s %s' "SKIPPED" "${PKG_PREFIX}/${PKG_NAME}")")
+          continue
+        fi
+        rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}" || leaf_error "Failed to enter ${srcdir}"
+        _start=${SECONDS}
+        leaf_${1}_package
+        _rc=$?
+        if [ ${_rc} -eq 0 ]; then
+          _elapsed=$((SECONDS - _start))
+          _summary+=("$(printf '%-12s %s  (%ss)' "${_ok}" "${PKG_PREFIX}/${PKG_NAME}" "${_elapsed}")")
+          leaf_journal INFO "$1 ${PKG_PREFIX}/${PKG_NAME} OK (elapsed=${_elapsed}s)"
+          leaf_trim_logs "${PKG_PREFIX}"
+        else
+          _failed="true"
+          _elapsed=$((SECONDS - _start))
+          _summary+=("$(printf '%-12s %s  (%ss)  log: %s' "FAILED" "${PKG_PREFIX}/${PKG_NAME}" "${_elapsed}" "${CURRENT_LOG}")")
+          leaf_journal ERROR "$1 ${PKG_PREFIX}/${PKG_NAME} FAILED (elapsed=${_elapsed}s, log=${CURRENT_LOG})"
+          leaf_trim_logs "${PKG_PREFIX}"
+        fi
+      done
+      ;;
+    unpack)
+      leaf_check_permission
+      leaf_journal INFO "Command: leaf $* (user=$(whoami))"
+      _total=$(($# - 1)) && _i=0
+      for _item in "${@:2}"; do
+        _i=$((_i + 1))
+        leaf_reset_state
+        leaf_banner "${_i}" "${_total}" "$(basename "${_item}")"
+        if [[ "${_failed}" == "true" ]]; then
+          echo -e "  ${YELLOW_COLOR}-> SKIPPED (previous package failed)${CLEAR_COLOR}"
+          leaf_journal WARNING "unpack $(basename "${_item}") SKIPPED (previous package failed)"
+          _summary+=("$(printf '%-12s %s' "SKIPPED" "$(basename "${_item}")")")
+          continue
+        fi
+        srcdir="${TEMP_DIR}/$(basename ${_item%.pkg.*})"
+        pkgdir="${srcdir}"/__pkgdir__
+        rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}" || leaf_error "Failed to enter ${srcdir}"
+        _start=${SECONDS}
+        leaf_unpack_package "${_item}"
+        _rc=$?
+        if [ ${_rc} -eq 0 ]; then
+          _elapsed=$((SECONDS - _start))
+          _summary+=("$(printf '%-12s %s  (%ss)' "INSTALLED" "${PKG_PREFIX}/${PKG_NAME}" "${_elapsed}")")
+          leaf_journal INFO "unpack ${PKG_PREFIX}/${PKG_NAME} OK (elapsed=${_elapsed}s)"
+          leaf_trim_logs "${PKG_PREFIX}"
+        else
+          _failed="true"
+          _elapsed=$((SECONDS - _start))
+          _summary+=("$(printf '%-12s %s  (%ss)  log: %s' "FAILED" "$(basename "${_item}")" "${_elapsed}" "${CURRENT_LOG}")")
+          leaf_journal ERROR "unpack $(basename "${_item}") FAILED (elapsed=${_elapsed}s, log=${CURRENT_LOG})"
+          leaf_trim_logs "${PKG_PREFIX}"
+        fi
+      done
+      ;;
+    *)
+      leaf_print_usage
+      ;;
+  esac
+
+  if [ ${#_summary[@]} -gt 1 ]; then
+    printf '\n'
+    echo -e "${PURPLE_COLOR}==================== Summary ====================${CLEAR_COLOR}"
+    for _item in "${_summary[@]}"; do
+      case "${_item}" in
+        FAILED*)  echo -e "${RED_COLOR}${_item}${CLEAR_COLOR}" ;;
+        SKIPPED*) echo -e "${YELLOW_COLOR}${_item}${CLEAR_COLOR}" ;;
+        *)        echo -e "${GREEN_COLOR}${_item}${CLEAR_COLOR}" ;;
+      esac
+    done
+  fi
+  if [ -s "${MESSAGE_FILE}" ]; then
+    cat "${MESSAGE_FILE}"
+  fi
+  [[ "${_failed}" == "false" ]]
+}
+
+leaf_banner() {
+  if [ "$2" -gt 1 ]; then
+    echo -e "${PURPLE_COLOR}==> [${1}/${2}] ${3}${CLEAR_COLOR}"
   else
-    local _item
-    case $1 in
-      prepare|build|install|remove|pack)
-        leaf_check_permission
-        for _item in "${@:2}"; do
-          leaf_find_pkgbuild "${_item}"
-          leaf_reset_state
-          source "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD
-          leaf_parse_options
-          srcdir="${BUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}"
-          pkgdir="${srcdir}"/__pkgdir__
-          rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}"
-          leaf_${1}_package
-        done
-        ;;
-      search)
-        leaf_search_package "${@:2}"
-        ;;
-      show)
-        for _item in "${@:2}"; do
-          leaf_find_pkgbuild "${_item}"
-          leaf_show_package
-        done
-        ;;
-      unpack)
-        for _item in "${@:2}"; do
-          leaf_check_permission
-          leaf_reset_state
-          leaf_unpack_package "${_item}"
-        done
-        ;;
-      *)
-        leaf_print_usage
-        ;;
-    esac
-    if [ -n "${MESSAGE}" ]; then
-      echo -e "${MESSAGE}"
-    fi
+    echo -e "${PURPLE_COLOR}==> ${3}${CLEAR_COLOR}"
+  fi
+}
+
+leaf_setup_logs() {
+  local _ts="$(date '+%Y%m%d-%H%M%S')"
+  BUILD_LOG_FILE="${LOG_DIR}/build/${PKG_PREFIX}/${PKG_NAME}-${_ts}.log"
+  TRANS_LOG_FILE="${LOG_DIR}/transaction/${PKG_PREFIX}/${PKG_NAME}-${_ts}.log"
+  install -dm755 "${LOG_DIR}/build/${PKG_PREFIX}" "${LOG_DIR}/transaction/${PKG_PREFIX}"
+  CURRENT_LOG=""
+}
+
+leaf_trim_logs() {
+  local _category _count _file
+  for _category in build transaction; do
+    [ -d "${LOG_DIR}/${_category}/$1" ] || continue
+    ls -1t "${LOG_DIR}/${_category}/$1" 2>/dev/null | tail -n "+$((LOG_KEEP + 1))" | while read -r _file; do
+      rm -f "${LOG_DIR}/${_category}/$1/${_file}"
+    done
+  done
+}
+
+leaf_journal() {
+  local _level="$1"
+  shift
+  printf '[%s] [%s] %s\n' "$(date '+%FT%T%:z')" "${_level}" "$*" >> "${LOG_DIR}/leaf.log"
+}
+
+# print the colored message to the terminal and a plain-text copy to the current log file
+leaf_emit() {
+  if { echo -e "$1" > /dev/tty; } 2>/dev/null; then
+    [ -z "${CURRENT_LOG}" ] || echo "$2" >> "${CURRENT_LOG}"
+  else
+    echo "$2"
   fi
 }
 
 leaf_error() {
-  echo -e "${RED_COLOR}ERROR: $1${CLEAR_COLOR}" && exit 1
+  leaf_emit "${RED_COLOR}ERROR: $1${CLEAR_COLOR}" "ERROR: $1"
+  exit 1
 }
 
 leaf_warning() {
-  echo -e "${YELLOW_COLOR}WARNING: $1${CLEAR_COLOR}"
+  leaf_emit "${YELLOW_COLOR}WARNING: $1${CLEAR_COLOR}" "WARNING: $1"
 }
 
 leaf_info() {
-  echo -e "${GREEN_COLOR}* $1${CLEAR_COLOR}"
+  leaf_emit "${GREEN_COLOR}* $1${CLEAR_COLOR}" "* $1"
+}
+
+# Ctrl+C handler: record the interruption in the journal, then exit with 130
+leaf_on_sigint() {
+  echo
+  local _detail="command=leaf ${LEAF_COMMAND}, package=${PKG_PREFIX:-?}/${PKG_NAME:-?}, phase=${LEAF_PHASE:-none}"
+  [ -z "${CURRENT_LOG}" ] || _detail+=", log=${CURRENT_LOG}"
+  case "${LEAF_COMMAND}:${LEAF_PHASE}" in
+    install:install|unpack:install)
+      _detail+=" -- package may be PARTIALLY INSTALLED, reinstall or remove it manually"
+      ;;
+    remove:remove)
+      _detail+=" -- package may be PARTIALLY REMOVED, remove it again"
+      ;;
+  esac
+  [ -w "${LOG_DIR}/leaf.log" ] && leaf_journal WARNING "interrupted by user (SIGINT): ${_detail}"
+  leaf_warning "Interrupted by user"
+  [ -z "${CURRENT_LOG}" ] || leaf_warning "Partial log: ${CURRENT_LOG}"
+  exit 130
+}
+
+# run one build/install phase: output goes to the log file (quiet mode)
+# or to both the terminal and the log file (verbose mode)
+leaf_run_phase() {
+  local _label="$1" _category="$2"
+  shift 2
+  local _log
+  case "${_category}" in
+    build)       _log="${BUILD_LOG_FILE}" ;;
+    transaction) _log="${TRANS_LOG_FILE}" ;;
+  esac
+  CURRENT_LOG="${_log}"
+  LEAF_PHASE="${_label}"
+  echo "==> [$(date '+%F %T')] ${_label}" >> "${_log}"
+  local _start=${SECONDS} _rc
+  if [[ "${VERBOSE}" == "true" ]]; then
+    echo -e "${GREEN_COLOR}==> ${_label}${CLEAR_COLOR}"
+    ( set -e; "$@" ) 2>&1 | tee -a "${_log}"
+    _rc=${PIPESTATUS[0]}
+  else
+    printf "  -> %-10s ... " "${_label}"
+    ( set -e; "$@" ) >> "${_log}" 2>&1
+    _rc=$?
+  fi
+  local _elapsed=$((SECONDS - _start))
+  if [ ${_rc} -eq 0 ]; then
+    [[ "${VERBOSE}" == "true" ]] || echo "done (${_elapsed}s)"
+  else
+    if [[ "${VERBOSE}" == "true" ]]; then
+      echo -e "${RED_COLOR}==> ${_label} FAILED (${_elapsed}s)${CLEAR_COLOR}"
+    else
+      echo "FAILED (${_elapsed}s)"
+    fi
+    echo -e "${RED_COLOR}----- last 50 lines of ${_log} -----${CLEAR_COLOR}"
+    tail -n 50 "${_log}"
+    echo -e "${RED_COLOR}----- full log: ${_log} -----${CLEAR_COLOR}"
+    leaf_journal ERROR "${PKG_PREFIX}/${PKG_NAME}: phase ${_label} failed (log=${_log})"
+  fi
+  return ${_rc}
 }
 
 leaf_record_message() {
-  MESSAGE+="\n${PURPLE_COLOR}* Message from ${PKG_PREFIX}/${PKG_NAME}${CLEAR_COLOR}\n"
-  local _item
-  for _item in "${@:1}"; do
-    MESSAGE+="${GREEN_COLOR}* ${_item}${CLEAR_COLOR}\n"
-  done
+  {
+    printf '\n'
+    printf "${PURPLE_COLOR}* Message from %s/%s${CLEAR_COLOR}\n" "${PKG_PREFIX}" "${PKG_NAME}"
+    local _item
+    for _item in "$@"; do
+      printf "${GREEN_COLOR}* %s${CLEAR_COLOR}\n" "${_item}"
+    done
+  } >> "${MESSAGE_FILE}"
+  leaf_journal INFO "Message from ${PKG_PREFIX}/${PKG_NAME}: $*"
 }
 
 leaf_print_usage() {
   cat << EOF
-Usage: leaf [option] [packages]
+Usage: leaf [--verbose] [option] [packages]
 
 Options:    
-  prepare    prepare packages but do not build
-  build      build packages but do not install
-  install    install packages
-  remove     remove packages
-  clean      clean all source folders
-  list       list installed packages
-  search     search packages by keyword
-  show       show package details
-  pack       build packages and pack
-  unpack     unpack binary packages
+  prepare         prepare packages but do not build
+  build           build packages but do not install
+  install         install packages
+  remove          remove packages
+  clean           clean all source folders
+  clean --logs    clean all source folders and logs
+  list            list installed packages
+  search          search packages by keyword
+  show            show package details
+  pack            build packages and pack
+  unpack          unpack binary packages
+  -v, --verbose   print full build output to the terminal
 
                     This leaf does not have Super Cow Powers.
 EOF
 }
 
 leaf_create_directories() {
-  install -dm755 "${DIST_DIR}"
-  install -dm755 "${BUILD_DIR}"
-  install -dm755 "${PKGBUILD_DIR}"
-  install -dm755 "${TRACE_DIR}"
-  install -dm755 "${HOOK_DIR}"
-  install -dm755 "${BINARY_DIR}"
-  install -dm755 "${TEMP_DIR}"
+  local _dir
+  for _dir in "${DIST_DIR}" "${BUILD_DIR}" "${PKGBUILD_DIR}" "${TRACE_DIR}" \
+              "${HOOK_DIR}" "${BINARY_DIR}" "${TEMP_DIR}" \
+              "${LOG_DIR}" "${LOG_DIR}/build" "${LOG_DIR}/transaction"; do
+    install -dm755 "${_dir}" || leaf_error "Failed to create directory ${_dir}"
+  done
 }
 
 leaf_check_permission() {
@@ -174,17 +382,17 @@ leaf_reset_state() {
 leaf_parse_options() {
   local _option_array=(${DEFAULT_BUILD_OPTIONS[@]} ${options[@]})
   for option in "${_option_array[@]}"; do
-    local key="${option#!}"        # 去掉前缀"!", 得到选项名称
+    local key="${option#!}"        # strip the leading "!" to get the option name
     if [[ "${option}" == !* ]]; then
-      BUILD_OPTIONS["${key}"]="0"  # 如果有"!"前缀, 设置为0
+      BUILD_OPTIONS["${key}"]="0"  # a "!" prefix disables the option
     else
-      BUILD_OPTIONS["${key}"]="1"  # 否则设置为1
+      BUILD_OPTIONS["${key}"]="1"  # otherwise enable it
     fi
   done
 }
 
 leaf_prepare_package() {
-  src_prepare
+  leaf_run_phase "prepare" build src_prepare
 }
 
 leaf_strip_files() {
@@ -247,7 +455,13 @@ leaf_compress_manpages() {
 }
 
 leaf_build_package() {
-  leaf_prepare_package
+  leaf_run_phase "prepare" build src_prepare
+  [ $? -eq 0 ] || return 1
+  leaf_run_phase "build" build leaf_build_steps
+  return $?
+}
+
+leaf_build_steps() {
   src_build
   local _option
   for _option in "${!BUILD_OPTIONS[@]}"; do
@@ -284,16 +498,24 @@ leaf_trace_package() {
 }
 
 leaf_invoke_hooks() {
-  local _hook _target
+  local _hook _file _target _run
   local _trace_dir="${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
   find "${HOOK_DIR}" -type f -name "*.HOOK" | while read -r _hook; do
+    target=()
+    operation() { :; }
     source "${_hook}"
-    for _target in "${target[@]}"; do
-      if [ -n "$(grep -e "${_target}" "${_trace_dir}"/FILES)" ]; then
-        operation
-        break
-      fi
-    done
+    _run="false"
+    while read -r _file; do
+      for _target in "${target[@]}"; do
+        if [[ "${_file}" == ${_target} ]]; then
+          _run="true"
+          break 2
+        fi
+      done
+    done < "${_trace_dir}"/FILES
+    if [[ "${_run}" == "true" ]]; then
+      operation
+    fi
   done
 }
 
@@ -340,19 +562,32 @@ leaf_update_environment() {
 
 leaf_install_package() {
   leaf_build_package
+  [ $? -eq 0 ] || return 1
+  leaf_run_phase "install" transaction leaf_install_steps
+  [ $? -eq 0 ] || return 1
+  leaf_update_environment
+  leaf_info "Package ${PKG_PREFIX}/${PKG_NAME} has been installed"
+}
+
+leaf_install_steps() {
   leaf_trace_package "${pkgdir}"
   src_preinstall
   leaf_merge_package "${pkgdir}"
   src_postinstall
   leaf_update_package_database add "${PKG_PREFIX}/${PKG_NAME}"
-  leaf_update_environment
-  leaf_info "Package ${PKG_PREFIX}/${PKG_NAME} has been installed"
 }
 
 leaf_remove_package() {
   [ -n "$(grep "${PKG_PREFIX}/${PKG_NAME}" ${INSTALLED_PACKAGES})" ] || {
     leaf_error "Package ${PKG_PREFIX}/${PKG_NAME} is NOT installed"
   }
+  leaf_run_phase "remove" transaction leaf_remove_steps
+  [ $? -eq 0 ] || return 1
+  leaf_update_environment
+  leaf_info "Package ${PKG_PREFIX}/${PKG_NAME} has been removed"
+}
+
+leaf_remove_steps() {
   src_preremove
   local _file _link _directory
   cat "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}/FILES" | while read -r _file; do
@@ -367,11 +602,17 @@ leaf_remove_package() {
   rm -rf "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
   src_postremove
   leaf_update_package_database delete "${PKG_PREFIX}/${PKG_NAME}"
-  leaf_update_environment
 }
 
 leaf_pack_package() {
   leaf_build_package
+  [ $? -eq 0 ] || return 1
+  leaf_run_phase "pack" build leaf_pack_steps
+  [ $? -eq 0 ] || return 1
+  leaf_info "Package ${PKG_PREFIX}/${PKG_NAME} has been packed to ${BINARY_DIR}"
+}
+
+leaf_pack_steps() {
   pushd "${srcdir}" > /dev/null 2>&1
   echo "${PKG_PREFIX}" > .PKG_PREFIX
   install -m644 "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD .PKGBUILD
@@ -403,21 +644,24 @@ leaf_show_package() {
 }
 
 leaf_unpack_package() {
-  srcdir="${TEMP_DIR}/$(basename ${1%.pkg.*})"
-  pkgdir="${srcdir}"/__pkgdir__
-  rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}"
-  tar -xf $1 -C "${srcdir}"
-  source "${srcdir}"/.PKGBUILD
+  tar -xf "$1" -C "${srcdir}" || leaf_error "Failed to extract $1"
+  source "${srcdir}"/.PKGBUILD || leaf_error "Failed to load .PKGBUILD from $1"
   PKG_PREFIX="$(cat "${srcdir}"/.PKG_PREFIX)"
   PKG_NAME="${pkgname}-${pkgver}"
-  install -Dm644 "${srcdir}"/.PKGBUILD "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD
+  leaf_setup_logs
+  install -Dm644 "${srcdir}"/.PKGBUILD "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD || return 1
+  leaf_run_phase "install" transaction leaf_unpack_steps
+  [ $? -eq 0 ] || return 1
+  leaf_update_environment
+  leaf_info "Package ${PKG_PREFIX}/${PKG_NAME} has been installed"
+}
+
+leaf_unpack_steps() {
   leaf_trace_package "${pkgdir}"
   src_preinstall
   leaf_merge_package "${pkgdir}"
   src_postinstall
   leaf_update_package_database add "${PKG_PREFIX}/${PKG_NAME}"
-  leaf_update_environment
-  leaf_info "Package ${PKG_PREFIX}/${PKG_NAME} has been installed"
 }
 
-main $@
+main "$@"

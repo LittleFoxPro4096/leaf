@@ -3,6 +3,7 @@ pkgver=""
 pkgdesc=""
 homepage=""
 license=("")
+pkgurl=("")
 sources=("${pkgname}-${pkgver}.tar.xz")
 
 src_prepare() {

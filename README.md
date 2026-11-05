@@ -21,6 +21,9 @@ HOOK_DIR               - 钩子目录
 BINARY_DIR             - 二进制包存放目录
 TEMP_DIR               - 二进制包解包临时目录
 INSTALLED_PACKAGES     - 已安装软件包数据库
+LOG_DIR                - 日志目录
+LOG_KEEP               - 每个软件包保留的最近日志份数
+VERBOSE                - 终端实时输出完整构建过程(true/false)
 PARALLEL_JOBS          - 构建并行数
 DEFAULT_BUILD_OPTIONS  - 默认构建选项
 COMPRESS_PROG          - 二进制包压缩程序
@@ -42,17 +45,19 @@ bash INSTALL.sh
 Leaf的命令格式:
 
 ```
-leaf [option] [packages]
+leaf [--verbose] [option] [packages]
 option:   prepare    准备软件但不编译或安装
           build      编译软件但不安装
           install    安装软件
           remove     删除已安装的程序
           clean      清理编译目录
+          clean --logs  清理编译目录和所有日志
           list       列出已安装的软件
           search     搜索软件, 支持模糊查询
           show       输出软件详细信息
           pack       构建并封装二进制包
           unpack     安装二进制包
+-v, --verbose: 在终端实时输出完整构建过程(等同配置VERBOSE="true")
 ```
 
 提示: 软件升级需要先移除旧版本再安装新版本, 否则可能会造成旧版本文件残留。
@@ -67,8 +72,9 @@ option:   prepare    准备软件但不编译或安装
 - pkgname        字符串, 软件名称
 - pkgver         字符串, 软件版本号
 - pkgdesc        字符串, 软件描述
-- pkgurl         字符串, 软件主页/上游地址
+- homepage       字符串, 软件主页/上游地址
 - license        数组, 软件许可证
+- pkgurl         数组, 软件包和补丁下载地址
 - sources        数组, 构建过程使用到的所有源码包和补丁
 - options        数组, 构建选项, 详见第4小节
 - srcdir         字符串, 构建路径(在leaf主程序中定义)
@@ -88,7 +94,7 @@ PKGBUILD定义的6个函数(*表示该函数必须定义, 其他函数默认为�
 
 编写PKGBUILD的一般原则: 模块见`template.PKGBUILD`, 语法必须符合`BASH`, 可以定义额外的函数(尽量不要在头部定义全局变量, 这会导致构建环境的污染, 需要手动`unset`, 推荐在函数中用`local`定义局部变量); `src_build`函数只负责编译软件, 并将其安装到`$pkgdir`, 而`src_[pre|post][install|remove]`函数只负责操作根文件系统; `Systemd`单元一般由用户手动开启或关闭。
 
-另外, 某些软件包需要生成缓存或更改文件属性才能正常使用(见`HOOKS.md`), 需要定义特定操作的后置钩子文件, 模板见`template.HOOK`, 语法需符合`BASH`。需要注意的是, `target()`中的路径需符合正则表达式规则。
+另外, 某些软件包需要生成缓存或更改文件属性才能正常使用(见`HOOKS.md`), 需要定义特定操作的后置钩子文件, 模板见`template.HOOK`, 语法需符合`BASH`。需要注意的是, `target()`中的路径使用shell通配符(glob)规则, 如`/usr/share/info/*.info*`, 与软件包安装文件列表中的完整路径进行匹配。
 
 ---
 
@@ -98,7 +104,7 @@ PKGBUILD定义的6个函数(*表示该函数必须定义, 其他函数默认为�
 
 - `strip`: 剥离二进制文件和库文件中的调试符号, 它可以让文件变得更小, 若您需要调试该程序, 则禁用该选项。
 
-- `libtool`: 保留`.la`文件, 通常来说不需要这种文件, 可以设置成`!strip`来移除所有的.la文件。
+- `libtool`: 保留`.la`文件, 通常来说不需要这种文件, 可以设置成`!libtool`来移除所有的.la文件。
 
 - `zipman`: 对man手册进行`gzip`压缩。
 
@@ -120,7 +126,36 @@ PKGBUILD定义的6个函数(*表示该函数必须定义, 其他函数默认为�
 
 ---
 
-## 7. Leaf的依赖组件
+## 7. 日志
+
+Leaf在运行时记录三类日志, 均存放在`LOG_DIR`(默认为`/var/lib/leaf/logs`)下:
+
+```
+leaf.log                            - 操作日志, 追加记录每次命令的调用时间、用户、目标软件包、执行结果和耗时
+build/<前缀>/<包>-<时间戳>.log        - 构建日志, src_prepare/src_build及构建选项处理的完整输出
+transaction/<前缀>/<包>-<时间戳>.log  - 事务日志, 安装、移除、解包过程中的文件操作和钩子输出
+```
+
+默认的简洁模式下, 终端只显示每个软件包的阶段进度与耗时, 完整输出写入日志文件:
+
+```
+==> [1/3] sys-devel/gcc-16.2.0
+  -> prepare   ... done (48s)
+  -> build     ... done (135s)
+  -> install   ... done (3s)
+```
+
+Leaf按顺序处理软件包, 若某个软件包失败, 终端会自动显示该阶段日志的最后50行和完整日志路径, 后续的软件包将被标记为`SKIPPED`而不再处理。命令结束时输出本次所有软件包的结果汇总。
+
+如需在终端实时查看完整构建过程, 可在`leaf.conf`中设置`VERBOSE="true"`, 或在命令行添加`-v`/`--verbose`参数。
+
+日志文件为纯文本, 不含终端颜色控制字符。每个软件包的构建日志和事务日志各保留最近`LOG_KEEP`份(默认20), 超出部分自动清理。使用`leaf clean --logs`可清理编译目录的同时清空所有日志。
+
+运行过程中按下`Ctrl+C`会立即终止当前操作, 终端显示中断警告和当前日志路径, 操作日志记录中断时的命令、软件包和阶段, 退出码为130。若在安装(merge)或移除阶段中断, 软件包可能处于半安装/半删除状态, 日志中会附带相应提示, 请重新安装或再次移除该软件包。
+
+---
+
+## 8. Leaf的依赖组件
 
 强依赖:
 

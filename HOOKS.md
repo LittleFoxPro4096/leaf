@@ -6,7 +6,7 @@
 
 文件:
 
-- `/usr/lib/systemd/system/.*`
+- `/usr/lib/systemd/system/*`
 
 操作:
 
@@ -22,7 +22,7 @@
 
 文件:
 
-- `/usr/share/info/.*\.info.*`
+- `/usr/share/info/*.info*`
 
 操作:
 
@@ -41,9 +41,9 @@ done
 
 文件:
 
-- `/etc/polkit-1/rules.d/.*\.rules`
+- `/etc/polkit-1/rules.d/*.rules`
 
-- `/usr/share/polkit-1/rules\.d/.*\.rules`
+- `/usr/share/polkit-1/rules.d/*.rules`
 
 操作:
 
@@ -59,7 +59,7 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 文件:
 
-- `/usr/share/applications/.*\.desktop`
+- `/usr/share/applications/*.desktop`
 
 操作:
 
@@ -75,7 +75,7 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 文件:
 
-- `/usr/share/mime/packages/.*\.xml`
+- `/usr/share/mime/packages/*.xml`
 
 操作:
 
@@ -87,17 +87,17 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 ## 6. 更新字体配置缓存
 
-软件: [media-libs/fontconfig](https://www.freedesktop.org/wiki/Software/fontconfig)
+软件: [media-libs/fontconfig](https://gitlab.gnome.org/GNOME/fontconfig)
 
 文件:
 
-- `/etc/fonts/conf.d/.*`
+- `/etc/fonts/conf.d/*`
 
-- `/usr/share/fonts/.*`
+- `/usr/share/fonts/*`
 
-- `/usr/share/fontconfig/conf\.avail/.*`
+- `/usr/share/fontconfig/conf.avail/*`
 
-- `/usr/share/fontconfig/conf\.default/.*`
+- `/usr/share/fontconfig/conf.default/*`
 
 操作:
 
@@ -113,7 +113,7 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 文件:
 
-- `/usr/lib/gio/modules/.*\.so`
+- `/usr/lib/gio/modules/*.so`
 
 操作:
 
@@ -129,9 +129,9 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 文件:
 
-- `/usr/share/glib-2\.0/schemas/.*\.gschema\.xml`
+- `/usr/share/glib-2.0/schemas/*.gschema.xml`
 
-- `/usr/share/glib-2\.0/schemas/.*\.gschema\.override`
+- `/usr/share/glib-2.0/schemas/*.gschema.override`
 
 操作:
 
@@ -141,13 +141,13 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 ---
 
-## 8. 检测`GDK-Pixbuf`加载器模块
+## 9. 检测`GDK-Pixbuf`加载器模块
 
 软件: [x11-libs/gdk-pixbuf](https://gitlab.gnome.org/GNOME/gdk-pixbuf)
 
 文件:
 
-- `/usr/lib/gdk-pixbuf-2\.0/2\.10\.0/loaders/.*\.so`
+- `/usr/lib/gdk-pixbuf-2.0/2.10.0/loaders/*.so`
 
 操作:
 
@@ -157,13 +157,13 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 ---
 
-## 9. 检测`GTK+2`模块
+## 10. 检测`GTK+2`模块
 
 软件: [x11-libs/gtk+-2](https://gitlab.gnome.org/GNOME/gtk)
 
 文件:
 
-- `/usr/lib/gtk-2\.0/2\.10\.0/immodules/.*\.so`
+- `/usr/lib/gtk-2.0/2.10.0/immodules/*.so`
 
 操作:
 
@@ -173,13 +173,13 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 ---
 
-## 10. 检测`GTK+3`模块
+## 11. 检测`GTK+3`模块
 
 软件: [x11-libs/gtk+-3](https://gitlab.gnome.org/GNOME/gtk)
 
 文件:
 
-- `/usr/lib/gtk-3\.0/3\.0\.0/immodules/.*\.so`
+- `/usr/lib/gtk-3.0/3.0.0/immodules/*.so`
 
 操作:
 
@@ -189,13 +189,13 @@ install -dm750 -g polkitd /{etc,usr/share}/polkit-1/rules.d
 
 ---
 
-## 11. 更新`GTK`图标主题
+## 12. 更新`GTK`图标主题
 
 软件: [x11-libs/gtk+](https://gitlab.gnome.org/GNOME/gtk)
 
 文件:
 
-- `/usr/share/icons/.*`
+- `/usr/share/icons/*`
 
 操作:
 
