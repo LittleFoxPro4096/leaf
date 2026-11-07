@@ -70,11 +70,11 @@ main() {
       if [[ "${2:-}" == "--logs" ]]; then
         rm -rf "${LOG_DIR}"/build/* "${LOG_DIR}"/transaction/*
         : > "${LOG_DIR}"/leaf.log
-        leaf_journal INFO "cleaned build/temp directories and all logs"
-        leaf_info "The build/temp directories and logs have been cleaned"
+        leaf_journal INFO "cleaned build and temp directories and all logs"
+        leaf_info "The build directories and logs have been cleaned"
       else
-        leaf_journal INFO "cleaned build/temp directories"
-        leaf_info "The build/temp directories have been cleaned"
+        leaf_journal INFO "cleaned build and temp directories"
+        leaf_info "The build directories have been cleaned"
       fi
       ;;
     list)
