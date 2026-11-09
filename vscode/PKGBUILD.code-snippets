@@ -7,6 +7,7 @@
       "pkgdesc=\"$3\"",
       "homepage=\"$4\"",
       "license=(\"$5\")",
+      "pkgurl=(\"$6\"))",
       "sources=(\"\\${pkgname}-\\${pkgver}.tar.xz\")",
       "",
       "src_prepare() {",
@@ -14,7 +15,7 @@
       "}",
       "",
       "src_build() {",
-      "  $6",
+      "  $7",
       "}",
       ""
     ],
