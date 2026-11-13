@@ -94,7 +94,7 @@ PKGBUILD定义的6个函数(*表示该函数必须定义, 其他函数默认为�
 
 编写PKGBUILD的一般原则: 模块见`template.PKGBUILD`, 语法必须符合`BASH`, 可以定义额外的函数(尽量不要在头部定义全局变量, 这会导致构建环境的污染, 需要手动`unset`, 推荐在函数中用`local`定义局部变量); `src_build`函数只负责编译软件, 并将其安装到`$pkgdir`, 而`src_[pre|post][install|remove]`函数只负责操作根文件系统; `Systemd`单元一般由用户手动开启或关闭。
 
-另外, 某些软件包需要生成缓存或更改文件属性才能正常使用(见`HOOKS.md`), 需要定义特定操作的后置钩子文件, 模板见`template.HOOK`, 语法需符合`BASH`。需要注意的是, `target()`中的路径使用shell通配符(glob)规则, 如`/usr/share/info/*.info*`, 与软件包安装文件列表中的完整路径进行匹配。
+另外, 某些软件包需要生成缓存或更改文件属性才能正常使用(见`HOOKS.md`), 需要定义特定操作的后置钩子文件, 模板见`template.HOOK`, 语法需符合`BASH`。需要注意的是, `target()`中的路径使用shell通配符(glob)规则, 如`/usr/share/info/*.info*`, 与软件包安装文件列表中的完整路径进行匹配。Leaf自带的钩子位于源码目录的`hooks/`下, 由`INSTALL.sh`安装到`HOOK_DIR`; 钩子在软件安装合并后以及移除文件后都会执行, 执行时的工作目录为根目录`/`。
 
 ---
 
@@ -174,6 +174,8 @@ Leaf按顺序处理软件包, 若某个软件包失败, 终端会自动显示该
 - [Grep](https://www.gnu.org/software/grep)
 
 - [Sed](https://www.gnu.org/software/sed)
+
+- [Util-linux](https://github.com/util-linux/util-linux)
 
 - [Gzip](http://www.gzip.org)
 

@@ -1,5 +1,7 @@
 # Leaf钩子列表
 
+钩子文件位于源码目录的`hooks/`下, 由`INSTALL.sh`安装到`HOOK_DIR`(默认为`/var/lib/leaf/hooks`)。软件包安装合并后以及移除文件后, 只要其文件列表命中`target`通配符, 对应的`operation`就会在根文件系统上执行。
+
 ## 1. 重新加载`Systemd`服务
 
 软件: [sys-apps/systemd](https://github.com/systemd/systemd)

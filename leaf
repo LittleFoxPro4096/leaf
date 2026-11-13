@@ -46,14 +46,14 @@ main() {
   MESSAGE_FILE="$(mktemp)" || leaf_error "Failed to create temporary file"
   leaf_create_directories
 
-  local _args=() _a
-  for _a in "$@"; do
-    case "${_a}" in
+  local _args=() _arg
+  for _arg in "$@"; do
+    case "${_arg}" in
       -v|--verbose)
         VERBOSE="true"
         ;;
       *)
-        _args+=("${_a}")
+        _args+=("${_arg}")
         ;;
     esac
   done
@@ -61,7 +61,7 @@ main() {
   LEAF_COMMAND="${1:-}"
 
   local _summary=() _failed="false"
-  local _i _total _item _start _elapsed _log _rc
+  local _index _total _item _start _elapsed _result
 
   case "${1:-}" in
     clean)
@@ -84,6 +84,7 @@ main() {
       leaf_search_package "${@:2}"
       ;;
     show)
+      [ $# -gt 1 ] || leaf_error "Usage: leaf show <package> [package ...]"
       for _item in "${@:2}"; do
         leaf_find_pkgbuild "${_item}"
         leaf_show_package
@@ -91,6 +92,7 @@ main() {
       ;;
     prepare|build|install|remove|pack)
       leaf_check_permission
+      [ $# -gt 1 ] || leaf_error "Usage: leaf $1 <package> [package ...]"
       local _ok
       case $1 in
         prepare) _ok="PREPARED" ;;
@@ -100,9 +102,9 @@ main() {
         pack)    _ok="PACKED" ;;
       esac
       leaf_journal INFO "Command: leaf $* (user=$(whoami))"
-      _total=$(($# - 1)) && _i=0
+      _total=$(($# - 1)) && _index=0
       for _item in "${@:2}"; do
-        _i=$((_i + 1))
+        _index=$((_index + 1))
         leaf_find_pkgbuild "${_item}"
         leaf_reset_state
         source "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD || leaf_error "Failed to load ${PKG_PREFIX}/${PKG_NAME}.PKGBUILD"
@@ -110,7 +112,7 @@ main() {
         srcdir="${BUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}"
         pkgdir="${srcdir}"/__pkgdir__
         leaf_setup_logs
-        leaf_banner "${_i}" "${_total}" "${PKG_PREFIX}/${PKG_NAME}"
+        leaf_banner "${_index}" "${_total}" "${PKG_PREFIX}/${PKG_NAME}"
         if [[ "${_failed}" == "true" ]]; then
           echo -e "  ${YELLOW_COLOR}-> SKIPPED (previous package failed)${CLEAR_COLOR}"
           leaf_journal WARNING "$1 ${PKG_PREFIX}/${PKG_NAME} SKIPPED (previous package failed)"
@@ -120,29 +122,30 @@ main() {
         rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}" || leaf_error "Failed to enter ${srcdir}"
         _start=${SECONDS}
         leaf_${1}_package
-        _rc=$?
-        if [ ${_rc} -eq 0 ]; then
+        _result=$?
+        if [ ${_result} -eq 0 ]; then
           _elapsed=$((SECONDS - _start))
           _summary+=("$(printf '%-12s %s  (%ss)' "${_ok}" "${PKG_PREFIX}/${PKG_NAME}" "${_elapsed}")")
           leaf_journal INFO "$1 ${PKG_PREFIX}/${PKG_NAME} OK (elapsed=${_elapsed}s)"
-          leaf_trim_logs "${PKG_PREFIX}"
+          leaf_trim_logs "${PKG_PREFIX}" "${PKG_NAME}"
         else
           _failed="true"
           _elapsed=$((SECONDS - _start))
           _summary+=("$(printf '%-12s %s  (%ss)  log: %s' "FAILED" "${PKG_PREFIX}/${PKG_NAME}" "${_elapsed}" "${CURRENT_LOG}")")
           leaf_journal ERROR "$1 ${PKG_PREFIX}/${PKG_NAME} FAILED (elapsed=${_elapsed}s, log=${CURRENT_LOG})"
-          leaf_trim_logs "${PKG_PREFIX}"
+          leaf_trim_logs "${PKG_PREFIX}" "${PKG_NAME}"
         fi
       done
       ;;
     unpack)
       leaf_check_permission
+      [ $# -gt 1 ] || leaf_error "Usage: leaf unpack <package-file> [package-file ...]"
       leaf_journal INFO "Command: leaf $* (user=$(whoami))"
-      _total=$(($# - 1)) && _i=0
+      _total=$(($# - 1)) && _index=0
       for _item in "${@:2}"; do
-        _i=$((_i + 1))
+        _index=$((_index + 1))
         leaf_reset_state
-        leaf_banner "${_i}" "${_total}" "$(basename "${_item}")"
+        leaf_banner "${_index}" "${_total}" "$(basename "${_item}")"
         if [[ "${_failed}" == "true" ]]; then
           echo -e "  ${YELLOW_COLOR}-> SKIPPED (previous package failed)${CLEAR_COLOR}"
           leaf_journal WARNING "unpack $(basename "${_item}") SKIPPED (previous package failed)"
@@ -154,18 +157,18 @@ main() {
         rm -rf "${srcdir}" && install -dm755 "${srcdir}" && cd "${srcdir}" || leaf_error "Failed to enter ${srcdir}"
         _start=${SECONDS}
         leaf_unpack_package "${_item}"
-        _rc=$?
-        if [ ${_rc} -eq 0 ]; then
+        _result=$?
+        if [ ${_result} -eq 0 ]; then
           _elapsed=$((SECONDS - _start))
           _summary+=("$(printf '%-12s %s  (%ss)' "INSTALLED" "${PKG_PREFIX}/${PKG_NAME}" "${_elapsed}")")
           leaf_journal INFO "unpack ${PKG_PREFIX}/${PKG_NAME} OK (elapsed=${_elapsed}s)"
-          leaf_trim_logs "${PKG_PREFIX}"
+          leaf_trim_logs "${PKG_PREFIX}" "${PKG_NAME}"
         else
           _failed="true"
           _elapsed=$((SECONDS - _start))
           _summary+=("$(printf '%-12s %s  (%ss)  log: %s' "FAILED" "$(basename "${_item}")" "${_elapsed}" "${CURRENT_LOG}")")
           leaf_journal ERROR "unpack $(basename "${_item}") FAILED (elapsed=${_elapsed}s, log=${CURRENT_LOG})"
-          leaf_trim_logs "${PKG_PREFIX}"
+          leaf_trim_logs "${PKG_PREFIX}" "${PKG_NAME}"
         fi
       done
       ;;
@@ -200,19 +203,19 @@ leaf_banner() {
 }
 
 leaf_setup_logs() {
-  local _ts="$(date '+%Y%m%d-%H%M%S')"
-  BUILD_LOG_FILE="${LOG_DIR}/build/${PKG_PREFIX}/${PKG_NAME}-${_ts}.log"
-  TRANS_LOG_FILE="${LOG_DIR}/transaction/${PKG_PREFIX}/${PKG_NAME}-${_ts}.log"
+  local _timestamp="$(date '+%Y%m%d-%H%M%S')"
+  BUILD_LOG_FILE="${LOG_DIR}/build/${PKG_PREFIX}/${PKG_NAME}-${_timestamp}.log"
+  TRANS_LOG_FILE="${LOG_DIR}/transaction/${PKG_PREFIX}/${PKG_NAME}-${_timestamp}.log"
   install -dm755 "${LOG_DIR}/build/${PKG_PREFIX}" "${LOG_DIR}/transaction/${PKG_PREFIX}"
   CURRENT_LOG=""
 }
 
 leaf_trim_logs() {
-  local _category _count _file
+  local _category _file
   for _category in build transaction; do
     [ -d "${LOG_DIR}/${_category}/$1" ] || continue
-    ls -1t "${LOG_DIR}/${_category}/$1" 2>/dev/null | tail -n "+$((LOG_KEEP + 1))" | while read -r _file; do
-      rm -f "${LOG_DIR}/${_category}/$1/${_file}"
+    ls -1t "${LOG_DIR}/${_category}/$1/$2"-*.log 2>/dev/null | tail -n "+$((LOG_KEEP + 1))" | while read -r _file; do
+      rm -f "${_file}"
     done
   done
 }
@@ -223,7 +226,6 @@ leaf_journal() {
   printf '[%s] [%s] %s\n' "$(date '+%FT%T%:z')" "${_level}" "$*" >> "${LOG_DIR}/leaf.log"
 }
 
-# print the colored message to the terminal and a plain-text copy to the current log file
 leaf_emit() {
   if { echo -e "$1" > /dev/tty; } 2>/dev/null; then
     [ -z "${CURRENT_LOG}" ] || echo "$2" >> "${CURRENT_LOG}"
@@ -245,7 +247,6 @@ leaf_info() {
   leaf_emit "${GREEN_COLOR}* $1${CLEAR_COLOR}" "* $1"
 }
 
-# Ctrl+C handler: record the interruption in the journal, then exit with 130
 leaf_on_sigint() {
   echo
   local _detail="command=leaf ${LEAF_COMMAND}, package=${PKG_PREFIX:-?}/${PKG_NAME:-?}, phase=${LEAF_PHASE:-none}"
@@ -264,8 +265,6 @@ leaf_on_sigint() {
   exit 130
 }
 
-# run one build/install phase: output goes to the log file (quiet mode)
-# or to both the terminal and the log file (verbose mode)
 leaf_run_phase() {
   local _label="$1" _category="$2"
   shift 2
@@ -277,18 +276,18 @@ leaf_run_phase() {
   CURRENT_LOG="${_log}"
   LEAF_PHASE="${_label}"
   echo "==> [$(date '+%F %T')] ${_label}" >> "${_log}"
-  local _start=${SECONDS} _rc
+  local _start=${SECONDS} _result
   if [[ "${VERBOSE}" == "true" ]]; then
     echo -e "${GREEN_COLOR}==> ${_label}${CLEAR_COLOR}"
     ( set -e; "$@" ) 2>&1 | tee -a "${_log}"
-    _rc=${PIPESTATUS[0]}
+    _result=${PIPESTATUS[0]}
   else
     printf "  -> %-10s ... " "${_label}"
     ( set -e; "$@" ) >> "${_log}" 2>&1
-    _rc=$?
+    _result=$?
   fi
   local _elapsed=$((SECONDS - _start))
-  if [ ${_rc} -eq 0 ]; then
+  if [ ${_result} -eq 0 ]; then
     [[ "${VERBOSE}" == "true" ]] || echo "done (${_elapsed}s)"
   else
     if [[ "${VERBOSE}" == "true" ]]; then
@@ -301,7 +300,7 @@ leaf_run_phase() {
     echo -e "${RED_COLOR}----- full log: ${_log} -----${CLEAR_COLOR}"
     leaf_journal ERROR "${PKG_PREFIX}/${PKG_NAME}: phase ${_label} failed (log=${_log})"
   fi
-  return ${_rc}
+  return ${_result}
 }
 
 leaf_record_message() {
@@ -352,19 +351,39 @@ leaf_check_permission() {
 }
 
 leaf_find_pkgbuild() {
-  local _location="$(find "${PKGBUILD_DIR}" -type f -wholename "*$1*.PKGBUILD" -printf "%P\n")"
+  local _query="$1" _location
+  local _exact="${_query}.PKGBUILD" _versioned="${_query}-[0-9]*.PKGBUILD"
+  if [[ "${_query}" == */* ]]; then
+    _exact="${PKGBUILD_DIR}/${_exact}"
+    _versioned="${PKGBUILD_DIR}/${_versioned}"
+    if [[ "${_query##*/}" == *-* ]]; then
+      _location="$(find "${PKGBUILD_DIR}" -type f -path "${PKGBUILD_DIR}/${_query}*.PKGBUILD" -printf "%P\n")"
+    else
+      _location="$(find "${PKGBUILD_DIR}" -type f \( -path "${_exact}" -o -path "${_versioned}" \) -printf "%P\n")"
+    fi
+  else
+    if [[ "${_query}" == *-* ]]; then
+      _location="$(find "${PKGBUILD_DIR}" -type f -name "${_query}*.PKGBUILD" -printf "%P\n")"
+    else
+      _location="$(find "${PKGBUILD_DIR}" -type f \( -name "${_exact}" -o -name "${_versioned}" \) -printf "%P\n")"
+    fi
+  fi
   if [ -z "${_location}" ]; then
     leaf_error "Package $1's PKGBUILD does NOT exist"
-  elif [[ $(echo "${_location}" | wc -l) == 1 ]]; then
-    PKG_PREFIX="$(echo "${_location}" | awk -F'/' '{print $1}')"
-    PKG_NAME="$(echo "${_location%.PKGBUILD}" | awk -F'/' '{print $2}')"
+  elif [ "$(echo "${_location}" | wc -l)" == "1" ]; then
+    PKG_PREFIX="${_location%%/*}"
+    PKG_NAME="${_location#*/}"
+    PKG_NAME="${PKG_NAME%.PKGBUILD}"
   else
     leaf_error "Ambiguous packages, the prefix or version of package must be specified"
   fi
 }
 
 leaf_reset_state() {
+  unset -f src_prepare src_build src_preinstall src_postinstall src_preremove src_postremove
+  unset pkgname pkgver pkgdesc homepage license pkgurl sources options srcdir pkgdir
   options=()
+  BUILD_OPTIONS=([strip]="0" [libtool]="0" [zipman]="0")
   src_preinstall() {
     :
   }
@@ -381,12 +400,13 @@ leaf_reset_state() {
 
 leaf_parse_options() {
   local _option_array=(${DEFAULT_BUILD_OPTIONS[@]} ${options[@]})
-  for option in "${_option_array[@]}"; do
-    local key="${option#!}"        # strip the leading "!" to get the option name
-    if [[ "${option}" == !* ]]; then
-      BUILD_OPTIONS["${key}"]="0"  # a "!" prefix disables the option
+  local _option _key
+  for _option in "${_option_array[@]}"; do
+    _key="${_option#!}"
+    if [[ "${_option}" == !* ]]; then
+      BUILD_OPTIONS["${_key}"]="0"
     else
-      BUILD_OPTIONS["${key}"]="1"  # otherwise enable it
+      BUILD_OPTIONS["${_key}"]="1"
     fi
   done
 }
@@ -400,25 +420,25 @@ leaf_strip_files() {
   local _file
   find . -type f | while read -r _file; do
     case $(file -bi "${_file}") in
-      *application/x-sharedlib*)             # shared libraries(.so)
+      *application/x-sharedlib*)
         strip --strip-unneeded "${_file}" || leaf_warning "Failed to strip ${_file}"
         ;;
-      *application/x-pie-executable*)        # position-independent executables
+      *application/x-pie-executable*)
         strip --strip-unneeded "${_file}" || leaf_warning "Failed to strip ${_file}"
         ;;
-      *application/x-archive*)               # static libraries(.a)
+      *application/x-archive*)
         strip --strip-debug "${_file}" || leaf_warning "Failed to strip ${_file}"
         ;;
-      *application/x-object*)                # object files(.o)
+      *application/x-object*)
         case "${_file}" in
-          *.ko)                              # kernel module
+          *.ko)
             strip --strip-unneeded "${_file}" || leaf_warning "Failed to strip ${_file}"
             ;;
           *)
             ;;
         esac
         ;;
-      *application/x-executable*)            # executable binaries
+      *application/x-executable*)
         strip --strip-all "${_file}" || leaf_warning "Failed to strip ${_file}"
         ;;
       *)
@@ -498,23 +518,24 @@ leaf_trace_package() {
 }
 
 leaf_invoke_hooks() {
-  local _hook _file _target _run
+  [ -d "${HOOK_DIR}" ] || return 0
+  local _hook _file _target _matched
   local _trace_dir="${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
   find "${HOOK_DIR}" -type f -name "*.HOOK" | while read -r _hook; do
     target=()
     operation() { :; }
     source "${_hook}"
-    _run="false"
+    _matched="false"
     while read -r _file; do
       for _target in "${target[@]}"; do
         if [[ "${_file}" == ${_target} ]]; then
-          _run="true"
+          _matched="true"
           break 2
         fi
       done
     done < "${_trace_dir}"/FILES
-    if [[ "${_run}" == "true" ]]; then
-      operation
+    if [[ "${_matched}" == "true" ]]; then
+      ( cd / && operation ) || leaf_warning "Hook $(basename "${_hook}") failed"
     fi
   done
 }
@@ -522,37 +543,41 @@ leaf_invoke_hooks() {
 leaf_merge_package() {
   pushd $1 > /dev/null 2>&1
   local _trace_dir="${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
-  local _item _mode _owner _group
-  cat "${_trace_dir}"/DIRS | while read -r _item; do
-    _mode=$(stat -c %a ."${_item}")
-    _owner=$(stat -c %u ."${_item}")
-    _group=$(stat -c %g ."${_item}")
-    install -dm ${_mode} -o ${_owner} -g ${_group} "${_item}"
-  done
-  cat "${_trace_dir}"/FILES | while read -r _item; do
-    _mode=$(stat -c %a ."${_item}")
-    _owner=$(stat -c %u ."${_item}")
-    _group=$(stat -c %g ."${_item}")
-    install -Dm ${_mode} -o ${_owner} -g ${_group} ."${_item}" "${_item}"
-  done
-  cat "${_trace_dir}"/LINKS | while read -r _item; do
-    cp -dp ."${_item}" "${_item}"
-  done
+  local _item _mode _owner _group _index
+  local _missing=() _results=()
+  while read -r _item; do
+    [ -d "${_item}" ] && continue
+    _missing+=("${_item}")
+  done < "${_trace_dir}"/DIRS
+  if [ ${#_missing[@]} -gt 0 ]; then
+    _index=0
+    while read -r _mode _owner _group; do
+      install -dm "${_mode}" -o "${_owner}" -g "${_group}" "${_missing[${_index}]}"
+      _index=$((_index + 1))
+    done < <(stat -c '%a %u %g' "${_missing[@]/#/.}")
+  fi
+  if [ -s "${_trace_dir}"/FILES ] || [ -s "${_trace_dir}"/LINKS ]; then
+    tar --xattrs --no-recursion -cf - -T <(sed 's|^|.|' "${_trace_dir}"/FILES "${_trace_dir}"/LINKS) \
+      | tar -C / -xp --xattrs --xattrs-include='*' -f -
+    _results=("${PIPESTATUS[@]}")
+    [ "${_results[0]}" -eq 0 ] && [ "${_results[1]}" -eq 0 ] || return 1
+  fi
   leaf_invoke_hooks
   popd > /dev/null 2>&1
 }
 
 leaf_update_package_database() {
-  local _item="$(echo "$2" | awk 'BEGIN{FS="/";OFS="\\/"}{print $1,$2}')"
-  case $1 in
-    add)
-      sed -i "/${_item}/d" "${INSTALLED_PACKAGES}"
-      echo "$2" >> ${INSTALLED_PACKAGES}
-      ;;
-    delete)
-      sed -i "/${_item}/d" "${INSTALLED_PACKAGES}"
-      ;;
-  esac
+  local _tmp_file _result
+  _tmp_file="$(mktemp)" || leaf_error "Failed to create temporary file"
+  (
+    flock -w 60 9 || leaf_error "Failed to lock ${INSTALLED_PACKAGES}"
+    grep -vxF -- "$2" "${INSTALLED_PACKAGES}" > "${_tmp_file}" 2>/dev/null || true
+    cat "${_tmp_file}" > "${INSTALLED_PACKAGES}"
+    [ "$1" == "delete" ] || echo "$2" >> "${INSTALLED_PACKAGES}"
+  ) 9>> "${INSTALLED_PACKAGES}.lock"
+  _result=$?
+  rm -f "${_tmp_file}"
+  return ${_result}
 }
 
 leaf_update_environment() {
@@ -578,7 +603,7 @@ leaf_install_steps() {
 }
 
 leaf_remove_package() {
-  [ -n "$(grep "${PKG_PREFIX}/${PKG_NAME}" ${INSTALLED_PACKAGES})" ] || {
+  grep -qxF "${PKG_PREFIX}/${PKG_NAME}" "${INSTALLED_PACKAGES}" 2>/dev/null || {
     leaf_error "Package ${PKG_PREFIX}/${PKG_NAME} is NOT installed"
   }
   leaf_run_phase "remove" transaction leaf_remove_steps
@@ -588,20 +613,28 @@ leaf_remove_package() {
 }
 
 leaf_remove_steps() {
-  src_preremove
+  local _trace_dir="${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
   local _file _link _directory
-  cat "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}/FILES" | while read -r _file; do
+  for _file in FILES LINKS DIRS; do
+    [ -f "${_trace_dir}/${_file}" ] || {
+      echo "missing trace file ${_trace_dir}/${_file}, refusing to remove"
+      return 1
+    }
+  done
+  src_preremove
+  while read -r _file; do
     rm -fv "${_file}"
-  done
-  cat "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}/LINKS" | while read -r _link; do
+  done < "${_trace_dir}/FILES"
+  while read -r _link; do
     [ ! -L "${_link}" ] || rm -fv "${_link}"
+  done < "${_trace_dir}/LINKS"
+  tac "${_trace_dir}/DIRS" | while read -r _directory; do
+    [ -L "${_directory}" ] || rmdir --ignore-fail-on-non-empty "${_directory}"
   done
-  cat "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}/DIRS" | while read -r _directory; do
-    rmdir --ignore-fail-on-non-empty "${_directory}"
-  done
-  rm -rf "${TRACE_DIR}/${PKG_PREFIX}/${PKG_NAME}"
+  leaf_invoke_hooks
   src_postremove
   leaf_update_package_database delete "${PKG_PREFIX}/${PKG_NAME}"
+  rm -rf "${_trace_dir}"
 }
 
 leaf_pack_package() {
@@ -619,22 +652,23 @@ leaf_pack_steps() {
   install -dm755 "${BINARY_DIR}"
   local _target="${BINARY_DIR}/${pkgname}-${pkgver}${BINARY_EXT}"
   rm -fv "${_target}"
-  tar -I "${COMPRESS_PROG}" -cf "${_target}" "$(basename ${pkgdir})" .PKG{_PREFIX,BUILD}
+  tar --xattrs -I "${COMPRESS_PROG}" -cf "${_target}" "$(basename ${pkgdir})" .PKG{_PREFIX,BUILD}
   popd > /dev/null 2>&1
 }
 
 leaf_search_package() {
-  local _item _regex
-  for _item in "$@"; do
-    _regex+="${_item}\|"
+  [ $# -gt 0 ] || leaf_error "Usage: leaf search <keyword> [keyword ...]"
+  local _keyword
+  local _filters=()
+  for _keyword in "$@"; do
+    _filters+=(-path "${PKGBUILD_DIR}/*${_keyword}*.PKGBUILD" -o)
   done
-  _regex="${_regex:0:${#_regex}-2}"
-  find "${PKGBUILD_DIR}" -type f -regex ".*\(${_regex}\).*\.PKGBUILD" -printf "%P\n" | while read -r _item; do
-    echo "${_item%.PKGBUILD}"
-  done
+  unset '_filters[-1]'
+  find "${PKGBUILD_DIR}" -type f \( "${_filters[@]}" \) -printf "%P\n" | sed 's|\.PKGBUILD$||'
 }
 
 leaf_show_package() {
+  leaf_reset_state
   source "${PKGBUILD_DIR}/${PKG_PREFIX}/${PKG_NAME}".PKGBUILD
   echo "Package: ${pkgname}"
   echo "Version: ${pkgver}"
@@ -644,7 +678,15 @@ leaf_show_package() {
 }
 
 leaf_unpack_package() {
-  tar -xf "$1" -C "${srcdir}" || leaf_error "Failed to extract $1"
+  case "$1" in
+    *.pkg.tar|*.pkg.tar.*) ;;
+    *) leaf_error "$1 is not a leaf binary package (*.pkg.tar.*)" ;;
+  esac
+  local _members
+  _members="$(tar -tf "$1" 2>/dev/null)" || leaf_error "$1 is not a readable tar archive"
+  grep -Eq '^(\./)?\.PKGBUILD$' <<< "${_members}" || leaf_error "$1 lacks .PKGBUILD, not a leaf binary package"
+  grep -Eq '^(\./)?\.PKG_PREFIX$' <<< "${_members}" || leaf_error "$1 lacks .PKG_PREFIX, not a leaf binary package"
+  tar --xattrs --xattrs-include='*' -xf "$1" -C "${srcdir}" || leaf_error "Failed to extract $1"
   source "${srcdir}"/.PKGBUILD || leaf_error "Failed to load .PKGBUILD from $1"
   PKG_PREFIX="$(cat "${srcdir}"/.PKG_PREFIX)"
   PKG_NAME="${pkgname}-${pkgver}"
